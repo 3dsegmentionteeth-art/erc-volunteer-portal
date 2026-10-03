@@ -1,0 +1,106 @@
+# ERC Volunteer Service Portal — local development stack.
+#
+# Core services (default `docker compose up -d`): postgres, redis, minio.
+# App/web services run under the `app` profile so the database stack can be
+# brought up without building the application containers:
+#   docker compose --profile app up -d
+#
+# All services share one dev network. Credentials below are DEVELOPMENT ONLY.
+# Image tags are pinned to the amd64 digests validated on this stack (Phase 7);
+# re-pin the digest after changing base images or if deploying on arm64.
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: erc
+      POSTGRES_PASSWORD: erc_dev_password
+      POSTGRES_DB: erc_portal
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erc -d erc_portal"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    # Dev object storage. Pinned to the validated digest (no more floating tag).
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: erc_dev
+      MINIO_ROOT_PASSWORD: erc_dev_secret
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: ./server
+    restart: unless-stopped
+    profiles: ["app"]
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://erc:erc_dev_password@postgres:5432/erc_portal?schema=public
+      REDIS_URL: redis://redis:6379
+      SESSION_SECRET: dev-only-session-secret-change-me
+      CSRF_SECRET: dev-only-csrf-secret-change-me
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: erc_dev
+      MINIO_SECRET_KEY: erc_dev_secret
+      MINIO_BUCKET: erc-documents
+      MINIO_USE_SSL: "false"
+      PUBLIC_HOST: http://localhost:4000
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    profiles: ["app"]
+    environment:
+      # `vite preview` proxies /api to the API container on the docker network.
+      ERC_PREVIEW_PROXY_TARGET: http://app:4000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

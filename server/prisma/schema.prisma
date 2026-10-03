@@ -1,0 +1,405 @@
+// ERC Volunteer Service Portal — database schema.
+//
+// Conventions:
+// - Status/lifecycle columns are `String` in this schema; their allowed
+//   values are enforced by PostgreSQL CHECK constraints added in the
+//   `0002_*` migration (see docs/ARCHITECTURE.md "Database constraints").
+// - `audit_logs` is append-only: an INSERT-only trigger guard is created in
+//   the same migration.
+// - Sessions are stored by `connect-pg-simple` in a `session` table created
+//   in migration SQL (not modeled here, because the library owns that table).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Branch {
+  id                   String               @id @default(cuid())
+  code                 String               @unique
+  nameEn               String               @map("name_en")
+  nameAr               String               @map("name_ar")
+  isActive             Boolean              @default(true) @map("is_active")
+  createdAt            DateTime             @default(now()) @map("created_at")
+
+  admins               Admin[]
+  registrations        Registration[]
+  volunteers           Volunteer[]
+  serviceTimeRecords   ServiceTimeRecord[]
+  timeAddRequests      TimeAddRequest[]
+  timeEditRequests     TimeEditRequest[]
+  adminTimeAdjustments AdminTimeAdjustment[]
+  auditLogs            AuditLog[]
+  documents            Document[]
+  serviceReports       ServiceReport[]
+
+  @@map("branches")
+}
+
+model Admin {
+  id                          String                @id @default(cuid())
+  username                    String                @unique
+  fullNameEn                  String                @map("full_name_en")
+  fullNameAr                  String?               @map("full_name_ar")
+  email                       String
+  phone                       String?
+  passwordHash                String                @map("password_hash")
+  // role: 'branch_admin' | 'hq_admin' (CHECK constrained in migration)
+  role                        String                @default("branch_admin")
+  branchId                    String?               @map("branch_id") // null => HQ admin (unscoped)
+  isActive                    Boolean               @default(true) @map("is_active")
+  createdAt                   DateTime              @default(now()) @map("created_at")
+  lastLoginAt                 DateTime?             @map("last_login_at")
+
+  branch                      Branch?               @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  assignedAddRequests         TimeAddRequest[]      @relation("addAssignedAdmin")
+  decidedAddRequests          TimeAddRequest[]      @relation("addDecidedByAdmin")
+  assignedEditRequests        TimeEditRequest[]     @relation("editAssignedAdmin")
+  decidedEditRequests         TimeEditRequest[]     @relation("editDecidedByAdmin")
+  adjustments                 AdminTimeAdjustment[]
+  reviewedDocuments           Document[]            @relation("documentReviewer")
+
+  @@index([branchId])
+  @@index([role])
+  @@map("admins")
+}
+
+model Registration {
+  id                 String       @id @default(cuid())
+  branchId           String       @map("branch_id")
+  englishName        String       @map("english_name")
+  arabicName         String?      @map("arabic_name")
+  email              String       @unique
+  phone              String
+  passwordHash       String       @map("password_hash")
+  organization       String?      // renamed from "school"
+  idNumber           String?      @map("id_number")
+  skills             Json?        // string[]; filtered client-side to the enum vocab of a volunteer UI later
+  certifications     Json?
+  educationInfo      String?      @map("education_info")
+  applicationAnswers Json?        @map("application_answers") // [{ key, answer }]
+  // status: 'pending' | 'approved' | 'rejected' (CHECK constrained)
+  status             String       @default("pending")
+  decidedBy          String?      @map("decided_by")
+  decidedAt          DateTime?    @map("decided_at")
+  volunteerId        String?      @unique @map("volunteer_id")
+  createdAt          DateTime     @default(now()) @map("created_at")
+
+  branch               Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  volunteer            Volunteer?              @relation(fields: [volunteerId], references: [id], onDelete: SetNull)
+  documents            Document[]
+  applicationAccessTokens ApplicationAccessToken[]
+
+  @@index([branchId])
+  @@index([status])
+  @@index([email])
+  @@map("registrations")
+}
+
+model Volunteer {
+  id                 String       @id @default(cuid())
+  branchId           String       @map("branch_id")
+  code               String       @unique // e.g. ERC-1001
+  englishName        String       @map("english_name")
+  arabicName         String?      @map("arabic_name")
+  email              String       @unique
+  emailVerified      Boolean      @default(false) @map("email_verified")
+  // set by an administrator after reviewing the volunteer's identity documents
+  identityVerified   Boolean      @default(false) @map("identity_verified")
+  phone              String?
+  passwordHash       String       @map("password_hash")
+  organization       String?
+  educationInfo      String?      @map("education_info")
+  skills             Json?
+  certifications     Json?
+  idNumber           String?      @map("id_number")
+  applicationAnswers Json?        @map("application_answers")
+  // status: 'approved' | 'rejected' (volunteers are created from approved
+  // registrations; CHECK constrained)
+  status             String       @default("approved")
+  approvedAt         DateTime?    @map("approved_at")
+  registrationId     String?      @unique @map("registration_id")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
+
+  branch             Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  registration       Registration?
+  serviceTimeRecords ServiceTimeRecord[]
+  timeAddRequests    TimeAddRequest[]
+  timeEditRequests   TimeEditRequest[]
+  adjustments        AdminTimeAdjustment[]
+  documents          Document[]
+  emailVerifications EmailVerification[]
+  serviceReports     ServiceReport[]
+
+  @@index([branchId])
+  @@index([status])
+  @@index([englishName])
+  @@index([arabicName])
+  @@map("volunteers")
+}
+
+model ServiceTimeRecord {
+  id                          String             @id @default(cuid())
+  volunteerId                 String             @map("volunteer_id")
+  branchId                    String             @map("branch_id")
+  date                        DateTime           @db.Date
+  event                       String
+  // signed; nonzero (CHECK in migration). Negative rows represent official
+  // admin subtractions. Volunteer-facing add/edit requests enforce > 0.
+  minutes                     Int
+  // source: 'add_request' | 'admin_adjustment' | 'seed' (CHECK)
+  source                      String             @default("add_request")
+  // reason required for admin-created records (enforced in service + zod)
+  reason                      String?
+  createdAt                   DateTime           @default(now()) @map("created_at")
+  updatedAt                   DateTime           @updatedAt @map("updated_at")
+
+  volunteer                   Volunteer          @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  branch                      Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  // FK relationships are owned by the request tables (see TimeAddRequest.recordId
+  // and TimeEditRequest.recordId); the opposites live here without their own FK.
+  addRequest                  TimeAddRequest?
+  editRequests                TimeEditRequest[]
+  adjustments                 AdminTimeAdjustment[]
+
+  @@index([volunteerId])
+  @@index([branchId])
+  @@index([date])
+  @@map("service_time_records")
+}
+
+model TimeAddRequest {
+  id              String              @id @default(cuid())
+  volunteerId     String              @map("volunteer_id")
+  branchId        String              @map("branch_id")
+  // optional: volunteer selects the admin/supervisor this request goes to
+  assignedAdminId String?             @map("assigned_admin_id")
+  date            DateTime            @db.Date
+  event           String
+  minutes         Int                 // CHECK minutes > 0
+  // status: 'pending' | 'approved' | 'rejected' (CHECK)
+  status          String              @default("pending")
+  decidedBy       String?             @map("decided_by")
+  decidedAt       DateTime?           @map("decided_at")
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  volunteer       Volunteer           @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  branch          Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  assignedAdmin   Admin?              @relation("addAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  decidedByAdmin  Admin?              @relation("addDecidedByAdmin", fields: [decidedBy], references: [id], onDelete: SetNull)
+  record          ServiceTimeRecord?  @relation(fields: [recordId], references: [id], onDelete: SetNull)
+  recordId        String?             @unique @map("record_id")
+
+  @@index([volunteerId])
+  @@index([branchId])
+  @@index([assignedAdminId])
+  @@index([status])
+  @@map("time_add_requests")
+}
+
+model TimeEditRequest {
+  id               String              @id @default(cuid())
+  volunteerId      String              @map("volunteer_id")
+  recordId         String              @map("record_id")
+  branchId         String              @map("branch_id")
+  assignedAdminId  String?             @map("assigned_admin_id")
+  // requested values
+  requestedDate    DateTime            @db.Date @map("requested_date")
+  requestedEvent   String              @map("requested_event")
+  requestedMinutes Int                 @map("requested_minutes") // CHECK > 0
+  reason           String
+  // original values, snapshotted at submission time
+  originalDate     DateTime            @db.Date @map("original_date")
+  originalEvent    String              @map("original_event")
+  originalMinutes  Int                 @map("original_minutes")
+  // status: 'pending' | 'approved' | 'rejected' (CHECK)
+  status           String              @default("pending")
+  decidedBy        String?             @map("decided_by")
+  decidedAt        DateTime?           @map("decided_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
+
+  volunteer        Volunteer           @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  record           ServiceTimeRecord   @relation(fields: [recordId], references: [id], onDelete: Restrict)
+  branch           Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  assignedAdmin    Admin?              @relation("editAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  decidedByAdmin   Admin?              @relation("editDecidedByAdmin", fields: [decidedBy], references: [id], onDelete: SetNull)
+
+  @@index([volunteerId])
+  @@index([recordId])
+  @@index([branchId])
+  @@index([assignedAdminId])
+  @@index([status])
+  @@map("time_edit_requests")
+}
+
+model AdminTimeAdjustment {
+  id           String             @id @default(cuid())
+  adminId      String             @map("admin_id")
+  volunteerId  String             @map("volunteer_id")
+  branchId     String             @map("branch_id")
+  date         DateTime           @db.Date
+  event        String
+  // signed; nonzero (CHECK). Negative subtracts, positive adds.
+  deltaMinutes Int                @map("delta_minutes")
+  // required (service + zod). Not nullable at the model level.
+  reason       String
+  // the record this adjustment edited/created, when applicable
+  recordId     String?            @map("record_id")
+  createdAt    DateTime           @default(now()) @map("created_at")
+
+  admin        Admin              @relation(fields: [adminId], references: [id], onDelete: Restrict)
+  volunteer    Volunteer          @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  branch       Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  record       ServiceTimeRecord? @relation(fields: [recordId], references: [id], onDelete: SetNull)
+
+  @@index([adminId])
+  @@index([volunteerId])
+  @@index([branchId])
+  @@map("admin_time_adjustments")
+}
+
+model AuditLog {
+  id         String    @id @default(cuid())
+  // actor_type: 'admin' | 'volunteer' | 'system' (CHECK)
+  actorType  String    @map("actor_type")
+  actorId    String?   @map("actor_id")
+  actorName  String?   @map("actor_name")
+  actorRole  String?   @map("actor_role")
+  action     String
+  targetType String?   @map("target_type")
+  targetId   String?   @map("target_id")
+  branchId   String?   @map("branch_id")
+  metadata   Json?
+  ipAddress  String?   @map("ip_address")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  branch     Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([action])
+  @@index([branchId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Document {
+  id             String       @id @default(cuid())
+  volunteerId    String?      @map("volunteer_id")
+  registrationId String?      @map("registration_id")
+  branchId       String       @map("branch_id")
+  objectKey      String       @map("object_key") // object-storage key; never inline binary
+  originalName   String       @map("original_name")
+  contentType    String       @map("content_type") // sniffed server-side
+  sizeBytes      Int          @map("size_bytes")
+  // category: 'photo' | 'id_document' | 'certificate' | 'other' (CHECK)
+  category       String       @map("category")
+  // status: 'pending' | 'approved' | 'rejected' (CHECK)
+  status         String       @default("pending")
+  reviewerId     String?      @map("reviewer_id")
+  reviewNote     String?      @map("review_note")
+  reviewedAt     DateTime?    @map("reviewed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  volunteer      Volunteer?   @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+  registration   Registration? @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reviewer       Admin?       @relation("documentReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@index([volunteerId])
+  @@index([registrationId])
+  @@index([branchId])
+  @@map("documents")
+}
+
+model VerificationReference {
+  id         String   @id @default(cuid())
+  ref        String   @unique // opaque token carried in QR payloads only
+  // scope: 'service_report' | 'admin_log' (CHECK)
+  scope      String
+  targetId   String   @map("target_id")
+  targetType String   @map("target_type")
+  issuedAt   DateTime @default(now()) @map("issued_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  // Phase 6.1: one report per reference. The credential's frozen snapshot and
+  // revocation live on the report row (the reference row is the public handle).
+  serviceReport ServiceReport?
+
+  @@index([scope])
+  @@map("verification_references")
+}
+
+// Phase 6.1: a single-volunteer service-hours credential. The approved totals
+// are FROZEN here at generation time — public verification returns exactly
+// these numbers, never a live recomputation — so a printed QR always matches
+// the paper it was printed on. Revocation is per-report (not per-reference)
+// and is the single source of truth for the public 404 on revoked credentials.
+model ServiceReport {
+  id               String    @id @default(cuid())
+  referenceId      String    @unique @map("reference_id")
+  volunteerId      String    @map("volunteer_id")
+  branchId         String    @map("branch_id")
+  issuedAt         DateTime  @map("issued_at") // set to the reference's issuedAt
+  // Frozen server-computed snapshot (see docs/SECURITY.md, Phase 6.1).
+  approvedMinutes  Int       @map("approved_minutes")
+  recordCount      Int       @map("record_count")
+  serviceDayCount  Int       @map("service_day_count")
+  // Revocation. revokedBy keeps a display name (audit-log style, denormalized).
+  revokedAt        DateTime? @map("revoked_at")
+  revokedBy        String?   @map("revoked_by")
+  revocationReason String?   @map("revocation_reason")
+  // Phase 6.2: snapshot provenance. NULL = issued live through the API;
+  // 'migration-live-backfill' = created by the pre-6.1 backfill script from
+  // the live ledger totals at migration time (a documented approximation,
+  // never the value true on issue day).
+  snapshotOrigin   String?   @map("snapshot_origin")
+
+  volunteer Volunteer                @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+  branch    Branch                   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reference VerificationReference    @relation(fields: [referenceId], references: [id], onDelete: Cascade)
+
+  @@index([volunteerId])
+  @@index([branchId])
+  @@map("service_reports")
+}
+
+model EmailVerification {
+  id          String    @id @default(cuid())
+  volunteerId String    @map("volunteer_id")
+  tokenHash   String    @map("token_hash") // store digest, never the raw token
+  expiresAt   DateTime  @map("expires_at")
+  usedAt      DateTime? @map("used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  volunteer   Volunteer @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+
+  @@index([volunteerId])
+  @@map("email_verifications")
+}
+
+// Short-lived proof the applicant possesses the emailed token for a *pending*
+// registration (document upload/delete). Same pattern as EmailVerification:
+// only the sha256 digest is stored, the raw token never is. Single-use at the
+// registration-life level: burned atomically when the registration is decided
+// (approve/reject), so it can never outlive a decision, but NOT per HTTP
+// request — the applicant attaches multiple documents (photo + id +
+// certificate) with one link. Rejected/expired/mismatched tokens are refused.
+model ApplicationAccessToken {
+  id             String       @id @default(cuid())
+  registrationId String       @map("registration_id")
+  tokenHash      String       @map("token_hash") // store digest, never the raw token
+  expiresAt      DateTime     @map("expires_at")
+  usedAt         DateTime?    @map("used_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  registration   Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId])
+  @@map("application_access_tokens")
+}

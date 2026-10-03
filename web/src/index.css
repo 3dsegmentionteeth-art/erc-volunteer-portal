@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+/* ERC brand theme — palette pinned in web/README.md. Tailwind v4 theme tokens
+   become utilities (bg-crimson, text-ink, ...). No external fonts/CDN: system
+   stacks are offline-safe and cover Arabic + Latin well. */
+@theme {
+  --color-crimson: #c70e1a;
+  --color-crimson-dark: #a90b15;
+  --color-crimson-deep: #7c0810;
+  --color-ink: #111827;
+  --color-muted: #667085;
+  --color-canvas: #f3f3f3;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", "Noto Kufi Arabic", "Tahoma", sans-serif;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    @apply bg-canvas text-ink antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-crimson);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-crimson);
+    color: #fff;
+  }
+}
+
+/* Respect reduced motion throughout. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
